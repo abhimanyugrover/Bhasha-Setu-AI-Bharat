@@ -24,9 +24,12 @@ st.set_page_config(
 try:
     from pipeline.config import LANGUAGES, OUTPUT_DIR
     from pipeline.main   import run_pipeline, run_transcribe_and_translate, run_tts_and_mux
+    from pipeline.downloader import get_video_info, download_to_temp
     PIPELINE_READY = True
 except ImportError:
     PIPELINE_READY = False
+    get_video_info  = None
+    download_to_temp = None
     LANGUAGES  = {
         "Hindi":     {"flag":"🇮🇳","native_name":"हिन्दी",   "tts":"polly"},
         "Tamil":     {"flag":"🇮🇳","native_name":"தமிழ்",    "tts":"edge"},
@@ -61,6 +64,13 @@ for k, v in {
     "hil_phase":    "idle",   # "idle" | "review" | "done"
     "hil_data":     None,     # phase-1 result dict
     "hil_tmp":      "",
+    # URL downloader state
+    "input_mode":       "upload",   # "upload" | "url"
+    "url_text":         "",
+    "url_info":         None,       # dict from get_video_info()
+    "b_input_mode":     "upload",   # batch tab input mode
+    "b_url_text":       "",
+    "b_url_info":       None,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -509,6 +519,13 @@ div[data-testid="stHorizontalBlock"] > div:first-child .stButton > button:hover 
 .f3{background:linear-gradient(90deg,#138808,#43A047,#66BB6A);}
 .f4{background:linear-gradient(90deg,#CC2200,#FF5722,#FF8A65);}
 .f5{background:linear-gradient(90deg,#6A1B9A,#AB47BC,#CE93D8);}
+
+/* ── Language select buttons ─────────────────────────────── */
+[data-testid="stButton"] button[kind="secondary"] {
+  font-size:10px !important; padding:3px 0 !important;
+  border-radius:8px !important; margin-top:4px !important;
+  width:100% !important;
+}
 .smsg { font-size:11px; color:var(--sm-c); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .sd   { color:var(--acc2) !important; font-weight:600; }
 .sr   { color:var(--acc1) !important; font-weight:600; }
@@ -680,38 +697,10 @@ div[data-testid="stHorizontalBlock"] > div:first-child .stButton > button:hover 
 footer,#MainMenu{visibility:hidden}
 .stAlert{background:var(--surf) !important;border:1px solid var(--surf-b) !important;border-radius:12px !important;}
 
-/* ── STREAMLIT TEXT INHERIT & VISIBILITY ─────────────────── */
+/* ── STREAMLIT TEXT INHERIT ──────────────────────────────── */
 .stMarkdown p, .stMarkdown li, .stMarkdown span { color:var(--tx1) !important; }
 [data-testid="stMarkdown"] b, [data-testid="stMarkdown"] strong { color:var(--tx1) !important; }
 code { color:var(--txa) !important; background:var(--surf) !important; padding:1px 6px; border-radius:5px; font-size:12px; }
-
-/* Labels, captions, help text — ensure readable in both themes */
-label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] span,
-[data-testid="stSlider"] label, [data-testid="stSlider"] span,
-[data-testid="stCheckbox"] label, [data-testid="stToggle"] label,
-[data-testid="stTextArea"] label, [data-testid="stTextInput"] label,
-p.stCaption, [data-testid="stCaptionContainer"] { color:var(--tx1) !important; }
-[data-testid="stExpander"] summary, [data-testid="stExpander"] summary span { color:var(--tx1) !important; }
-[data-testid="stExpander"] div { color:var(--tx2) !important; background:var(--surf) !important; }
-
-/* Status, alerts — readable text */
-[data-testid="stStatus"] div, [data-testid="stStatus"] span, [data-testid="stStatus"] p { color:var(--tx1) !important; }
-[data-baseweb="notification"] { background:var(--surf) !important; border:1px solid var(--surf-b) !important; color:var(--tx1) !important; }
-[data-baseweb="notification"] p, [data-baseweb="notification"] div { color:var(--tx1) !important; }
-
-/* Text inputs & areas — visible text on themed background */
-[data-testid="stTextArea"] textarea, [data-testid="stTextInput"] input {
-  color:var(--tx1) !important; background:var(--inp-bg) !important; border-color:var(--inp-b) !important;
-}
-
-/* Light mode: header & chrome adjustments */
-[data-theme="light"] [data-testid="stHeader"] {
-  background:rgba(255,255,255,0.85) !important; border-bottom-color:rgba(255,153,51,0.25) !important;
-}
-
-/* Info, success, error, warning — always readable text */
-.stAlert p, .stAlert div, [data-testid="stAlert"] p, [data-testid="stAlert"] div,
-[data-baseweb="toast"] p, [data-baseweb="toast"] div { color:var(--tx1) !important; }
 
 </style>
 """, unsafe_allow_html=True)
@@ -938,33 +927,152 @@ with t_dub:
     col_L, col_R = st.columns([1.05, 0.95], gap="large")
 
     with col_L:
-        # Upload
+        # ── Video Source Card ────────────────────────────────────────────
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown('<div class="sh">📁 Upload English Video</div>', unsafe_allow_html=True)
-        uploaded = st.file_uploader(
-            "video", type=["mp4","mov","avi","mkv"],
-            help="MP4, MOV, AVI or MKV · max ~500 MB",
-            label_visibility="collapsed"
+        st.markdown('<div class="sh">📁 Video Source</div>', unsafe_allow_html=True)
+
+        input_mode = st.radio(
+            "input_mode_radio",
+            options=["📁 Upload File", "🔗 Paste URL"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="input_mode_radio",
         )
-        if uploaded:
-            fsize = len(uploaded.getvalue()) / (1024*1024)
-            st.markdown(f"""
-            <div style="display:flex;gap:9px;margin-top:10px;flex-wrap:wrap">
-              <span class="chip chip-on">📄 {uploaded.name}</span>
-              <span class="chip chip-on">💾 {fsize:.1f} MB</span>
-            </div>""", unsafe_allow_html=True)
+        st.session_state.input_mode = "url" if "URL" in input_mode else "upload"
+        st.markdown('<hr class="div" style="margin:10px 0">', unsafe_allow_html=True)
+
+        uploaded = None
+
+        if st.session_state.input_mode == "upload":
+            # ── File upload mode ──────────────────────────────────────
+            uploaded = st.file_uploader(
+                "video", type=["mp4","mov","avi","mkv"],
+                help="MP4, MOV, AVI or MKV · max ~500 MB",
+                label_visibility="collapsed"
+            )
+            if uploaded:
+                fsize = len(uploaded.getvalue()) / (1024*1024)
+                st.markdown(f"""
+                <div style="display:flex;gap:9px;margin-top:10px;flex-wrap:wrap">
+                  <span class="chip chip-on">📄 {uploaded.name}</span>
+                  <span class="chip chip-on">💾 {fsize:.1f} MB</span>
+                </div>""", unsafe_allow_html=True)
+            # Clear URL state when switching to upload
+            st.session_state.url_info = None
+            st.session_state.url_text = ""
+
+        else:
+            # ── URL mode ──────────────────────────────────────────────
+            url_col, btn_col = st.columns([4, 1])
+            with url_col:
+                url_input = st.text_input(
+                    "Video URL",
+                    value=st.session_state.url_text,
+                    placeholder="https://www.youtube.com/watch?v=...",
+                    label_visibility="collapsed",
+                    key="url_text_input",
+                )
+            with btn_col:
+                fetch_btn = st.button("🔍 Fetch", key="fetch_btn",
+                                      disabled=not PIPELINE_READY or not url_input.strip())
+
+            st.session_state.url_text = url_input
+
+            if fetch_btn and url_input.strip() and get_video_info:
+                with st.spinner("Fetching video info…"):
+                    try:
+                        info = get_video_info(url_input.strip())
+                        st.session_state.url_info = info
+                    except Exception as e:
+                        st.error(f"❌ {e}")
+                        st.session_state.url_info = None
+
+            # Show video info preview once fetched
+            if st.session_state.url_info:
+                info    = st.session_state.url_info
+                dur     = info.get("duration")
+                dur_str = f"{int(dur)//60}m {int(dur)%60}s" if dur else "Unknown"
+
+                ic1, ic2 = st.columns([1, 2])
+                if info.get("thumbnail"):
+                    ic1.image(info["thumbnail"], use_container_width=True)
+                with ic2:
+                    st.markdown(f"""
+                    <div style="padding:4px 0">
+                      <div style="font-family:'Baloo 2',sans-serif;font-size:13px;
+                                  font-weight:700;color:var(--tx1);line-height:1.4">
+                        {info.get('title','')[:80]}
+                      </div>
+                      <div style="font-size:12px;color:var(--tx3);margin-top:5px">
+                        🌐 {info.get('platform','')}
+                        {f"· 👤 {info.get('uploader','')}" if info.get('uploader') else ''}
+                        · ⏱️ {dur_str}
+                      </div>
+                      <div style="margin-top:8px">
+                        <span class="chip chip-on">✅ Ready to dub</span>
+                      </div>
+                    </div>""", unsafe_allow_html=True)
+
+                st.markdown(
+                    '<div style="font-size:11.5px;color:var(--tx3);margin-top:6px">'
+                    '⚡ Video will be fetched and sent directly to S3 when you click '
+                    '<b>Start Dubbing</b> — no local download needed.</div>',
+                    unsafe_allow_html=True,
+                )
+
         st.markdown('</div>', unsafe_allow_html=True)
+
+        # Video is ready to dub when:
+        # - upload mode: file uploaded
+        # - url mode: info fetched (pipeline fetches video internally when run)
+        video_ready = (
+            (st.session_state.input_mode == "upload" and uploaded is not None) or
+            (st.session_state.input_mode == "url"    and st.session_state.url_info is not None)
+        )
 
         # Language
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown('<div class="sh">🌏 Target Language</div>', unsafe_allow_html=True)
-        st.markdown(lang_grid(LANGUAGES, st.session_state.sel_lang), unsafe_allow_html=True)
-        sel = st.selectbox(
-            "Language", options=list(LANGUAGES.keys()),
-            index=list(LANGUAGES.keys()).index(st.session_state.sel_lang),
-            label_visibility="collapsed", key="lsb"
+        st.markdown(
+            '<p style="font-size:12px;color:var(--tx3);margin:-4px 0 12px">Click a card to select</p>',
+            unsafe_allow_html=True,
         )
-        st.session_state.sel_lang = sel
+
+        # Clickable language button grid — 4 columns
+        lang_keys = list(LANGUAGES.keys())
+        eb_lbl    = {"polly": "Polly Neural", "edge": "Edge Neural", "gtts": "gTTS"}
+        for row_start in range(0, len(lang_keys), 4):
+            cols = st.columns(4, gap="small")
+            for ci, lname in enumerate(lang_keys[row_start : row_start + 4]):
+                lcfg    = LANGUAGES[lname]
+                is_sel  = (lname == st.session_state.sel_lang)
+                tts_lbl = eb_lbl.get(lcfg["tts"], lcfg["tts"])
+                tts_cls = {"polly": "eb-p", "edge": "eb-e", "gtts": "eb-g"}.get(lcfg["tts"], "eb-e")
+                border  = "2px solid #FF9933" if is_sel else "1.5px solid var(--lang-b)"
+                bg      = "var(--langsel-bg)" if is_sel else "var(--lang-bg)"
+                shadow  = "0 8px 24px rgba(255,100,0,0.32), 0 0 0 3px rgba(255,153,51,0.16)" if is_sel else "0 3px 12px rgba(0,0,0,0.24)"
+
+                cols[ci].markdown(f"""
+                <div style="background:{bg};border:{border};border-radius:18px;
+                            padding:12px 6px 10px;text-align:center;
+                            box-shadow:{shadow};transition:all .22s ease;margin-bottom:2px">
+                  <span style="font-size:26px;display:block;margin-bottom:3px">{lcfg['flag']}</span>
+                  <span style="font-family:'Baloo 2',sans-serif;font-size:12px;font-weight:700;
+                               color:var(--lang-n);display:block">{lname}</span>
+                  <span style="font-size:10.5px;color:var(--lang-nat);display:block;margin-top:1px">
+                    {lcfg['native_name']}</span>
+                  <span class="eb {tts_cls}" style="margin-top:5px">{tts_lbl}</span>
+                </div>""", unsafe_allow_html=True)
+
+                if cols[ci].button(
+                    "✓ Selected" if is_sel else "Select",
+                    key=f"lang_btn_{lname}",
+                    use_container_width=True,
+                ):
+                    st.session_state.sel_lang = lname
+                    st.rerun()
+
+        st.markdown('</div>', unsafe_allow_html=True)
 
         # Optional: lightweight voice previews below the grid
         st.markdown(
@@ -1041,18 +1149,62 @@ with t_dub:
         st.markdown('</div>', unsafe_allow_html=True)
 
     with col_R:
-        # Placeholders for status + results
-        status_ph = st.empty()
-        btn_ph    = st.empty()
-        res_ph    = st.empty()
+        # ── Run button ───────────────────────────────────────────────
+        run_btn = st.button(
+            "🚀  Start Dubbing",
+            disabled=st.session_state.running or not PIPELINE_READY or not video_ready,
+            key="run_btn",
+            use_container_width=True,
+        )
 
-        # Launch button
-        with btn_ph.container():
-            run_btn = st.button(
-                "🚀  Start Dubbing",
-                disabled=st.session_state.running or not PIPELINE_READY or (uploaded is None),
-                key="run_btn"
-            )
+        # ── Live progress dashboard placeholder ──────────────────────
+        prog_ph = st.empty()
+
+        # Render idle state when not running and no result yet
+        if not st.session_state.running and not st.session_state.result:
+            sel_cfg = LANGUAGES.get(st.session_state.sel_lang, {})
+            prog_ph.markdown(f"""
+            <div class="pdash" style="margin-top:12px">
+              <div class="pdash-hdr">
+                <span>⚙️ Pipeline Stages</span>
+                <span style="font-size:12px;color:var(--tx3);font-weight:500">Ready</span>
+              </div>
+              {"".join(f'''
+              <div class="srow">
+                <div class="sicon">{ico}</div>
+                <div class="sinfo">
+                  <div class="slr">
+                    <span class="sname" style="color:var(--tx3)">{lbl}</span>
+                    <span class="spct" style="color:var(--tx3)">—</span>
+                  </div>
+                  <div class="strack"><div class="sfill {fc}" style="width:0%"></div></div>
+                </div>
+              </div>''' for ico,lbl,fc in [
+                ("📤","Upload & Prepare","f1"),
+                ("🎙️","Transcribe","f2"),
+                ("🌐","Translate","f3"),
+                ("🔊","Synthesise TTS","f4"),
+                ("🎬","Mux & Export","f5"),
+              ])}
+              <div style="margin-top:14px;padding:10px 12px;background:var(--surf);
+                          border-radius:12px;border:1px solid var(--surf-b)">
+                <div style="font-size:11px;color:var(--tx3);font-weight:600;
+                            letter-spacing:.8px;text-transform:uppercase;margin-bottom:4px">
+                  Selected Language
+                </div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:22px">{sel_cfg.get('flag','🌐')}</span>
+                  <div>
+                    <span style="font-family:'Baloo 2',sans-serif;font-size:14px;
+                                 font-weight:700;color:var(--tx1)">{st.session_state.sel_lang}</span>
+                    <span style="font-size:11px;color:var(--tx3);margin-left:6px">
+                      {sel_cfg.get('native_name','')}</span>
+                  </div>
+                </div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+        res_ph = st.empty()
 
         # Results layout: video + downloads on left, texts (and summary) on right
         if st.session_state.result and not st.session_state.running:
@@ -1194,15 +1346,14 @@ with t_dub:
                     st.session_state.running = False
                     st.error(f"Phase 2 error: {e}")
                 finally:
-                    # Clean up temp
-                    try:
-                        os.unlink(st.session_state.hil_tmp)
-                    except Exception:
-                        pass
+                    # Only delete hil_tmp if it's an upload-mode temp file
+                    if st.session_state.input_mode == "upload" and st.session_state.hil_tmp:
+                        try: os.unlink(st.session_state.hil_tmp)
+                        except Exception: pass
                     st.session_state.hil_tmp = ""
 
     # ── Pipeline execution ────────────────────────────────────────────────
-    if run_btn and uploaded and PIPELINE_READY:
+    if run_btn and video_ready and PIPELINE_READY:
         st.session_state.running   = True
         st.session_state.result    = None
         st.session_state.pcts      = [0.0]*5
@@ -1210,117 +1361,175 @@ with t_dub:
         st.session_state.cur_stage = 1
         res_ph.empty()
 
-        # Persist temp file path in session for optional 2-phase HIL flow
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-            tmp.write(uploaded.getvalue())
-            tmp_path = tmp.name
-        st.session_state.hil_tmp = tmp_path
+        # Build source args for pipeline
+        if st.session_state.input_mode == "url":
+            # URL mode: pass the URL — pipeline fetches & uploads internally
+            _pipeline_video_path = ""
+            _pipeline_video_url  = st.session_state.url_text.strip()
+            st.session_state.hil_tmp = ""   # no local temp to track
+        else:
+            # Upload mode: write bytes to temp file as before
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+                tmp.write(uploaded.getvalue())
+                _pipeline_video_path = tmp.name
+            _pipeline_video_url  = ""
+            st.session_state.hil_tmp = _pipeline_video_path
 
         if opt_preview:
-            p_ph = st.empty()
-            p_ph.info(f"⏳ Generating {preview_secs}s preview…")
-            pc = clip_preview(tmp_path, preview_secs)
-            if pc:
-                p_ph.empty()
-                st.markdown(f'<div class="sh">🎬 {preview_secs}s Preview</div>', unsafe_allow_html=True)
-                st.video(pc)
+            if _pipeline_video_path:
+                p_ph = st.empty()
+                p_ph.info(f"⏳ Generating {preview_secs}s preview…")
+                pc = clip_preview(_pipeline_video_path, preview_secs)
+                if pc:
+                    p_ph.empty()
+                    st.markdown(f'<div class="sh">🎬 {preview_secs}s Preview</div>', unsafe_allow_html=True)
+                    st.video(pc)
+                else:
+                    p_ph.warning("Preview failed — running full video.")
             else:
-                p_ph.warning("Preview failed — running full video.")
+                st.info("ℹ️ Preview not available for URL mode — starting dubbing directly.")
 
-        # Streamlit-native status container for pipeline stages
+        # ── Live progress dashboard renderer ─────────────────────────
+        _STAGE_META = [
+            ("📤", "Upload & Prepare",  "f1"),
+            ("🎙️", "Transcribe",        "f2"),
+            ("🌐", "Translate",         "f3"),
+            ("🔊", "Synthesise TTS",    "f4"),
+            ("🎬", "Mux & Export",      "f5"),
+        ]
+
+        def _render_pdash(pcts, msgs, cur_stage, status_label="Running…", done=False, error=False):
+            overall = int(sum(pcts) / 5)
+            hdr_color = "#43A047" if done else ("#F44336" if error else "var(--acc1)")
+            status_icon = "✅" if done else ("❌" if error else "⚙️")
+            rows_html = ""
+            for i, (ico, lbl, fc) in enumerate(_STAGE_META):
+                pct    = pcts[i]
+                msg    = msgs[i]
+                active = (i + 1 == cur_stage) and not done and not error
+                done_s = pct >= 100
+                icon_cls = "sicon act" if active else "sicon"
+                name_col = "#43A047" if done_s else ("var(--acc1)" if active else "var(--tx3)")
+                pct_col  = "#43A047" if done_s else ("var(--acc1)" if active else "var(--tx3)")
+                tick     = " ✓" if done_s else ""
+                msg_html = (
+                    f'<div style="font-size:10.5px;color:var(--tx3);margin-top:2px;'
+                    f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{msg}</div>'
+                    if msg else ""
+                )
+                rows_html += f"""
+                <div class="srow">
+                  <div class="{icon_cls}">{ico}</div>
+                  <div class="sinfo">
+                    <div class="slr">
+                      <span class="sname" style="color:{name_col}">{lbl}{tick}</span>
+                      <span class="spct" style="color:{pct_col}">{pct:.0f}%</span>
+                    </div>
+                    <div class="strack">
+                      <div class="sfill {fc}" style="width:{pct}%"></div>
+                    </div>
+                    {msg_html}
+                  </div>
+                </div>"""
+
+            prog_ph.markdown(f"""
+            <div class="pdash" style="margin-top:12px">
+              <div class="pdash-hdr">
+                <span>{status_icon} {status_label}</span>
+                <span class="pdash-ov" style="background:linear-gradient(135deg,{hdr_color},{hdr_color});
+                      -webkit-background-clip:text;-webkit-text-fill-color:transparent">
+                  {overall}%
+                </span>
+              </div>
+              {rows_html}
+            </div>""", unsafe_allow_html=True)
+
+        # Stage labels
         stages_labels = {
-            1: "📤 Uploading & preparing video…",
-            2: "🎙️ Transcribing audio with AWS Transcribe…",
-            3: "🌐 Translating transcript…",
-            4: "🔊 Generating TTS audio…",
-            5: "🎬 Muxing dubbed audio with video…",
+            1: "📥 Fetching & uploading…" if _pipeline_video_url else "📤 Uploading…",
+            2: "🎙️ Transcribing…",
+            3: "🌐 Translating…",
+            4: "🔊 Synthesising TTS…",
+            5: "🎬 Muxing & exporting…",
         }
 
         pcts = [0.0]*5
         msgs = [""]*5
 
-        # If HIL is enabled, run only Phase 1 (upload + transcribe + translate)
+        # Shared progress callback — updates the live dashboard
+        def pcb(stage, sub_pct, message):
+            pcts[stage-1] = min(100.0, float(sub_pct))
+            msgs[stage-1] = message
+            st.session_state.pcts     = list(pcts)
+            st.session_state.msgs     = list(msgs)
+            st.session_state.cur_stage = stage
+            _render_pdash(pcts, msgs, stage,
+                          status_label=stages_labels.get(stage, f"Stage {stage}"))
+
+        # Initial dashboard render
+        _render_pdash(pcts, msgs, 1, status_label=stages_labels[1])
+
+        # ── HIL phase 1 ──────────────────────────────────────────────
         if st.session_state.hil_enabled:
-            with st.status("Phase 1: transcription & translation…", expanded=True) as status:
-                def pcb(stage, sub_pct, message):
-                    pcts[stage-1] = min(100.0, float(sub_pct))
-                    msgs[stage-1] = message
-                    st.session_state.pcts = pcts
-                    st.session_state.msgs = msgs
-                    st.session_state.cur_stage = stage
-                    label = stages_labels.get(stage, f"Stage {stage}")
-                    status.update(label=label, state="running")
-                    st.write(f"**{label}** – {pcts[stage-1]:.0f}% {('· ' + message) if message else ''}")
+            try:
+                phase1 = run_transcribe_and_translate(
+                    video_path=_pipeline_video_path,
+                    video_url=_pipeline_video_url,
+                    target_language=st.session_state.sel_lang,
+                    progress_cb=pcb,
+                    generate_srt=opt_srt,
+                    polish_translation=opt_polish,
+                )
+                _render_pdash(pcts, msgs, 3, status_label="Phase 1 complete ✅", done=True)
+                st.session_state.hil_phase = "review"
+                st.session_state.hil_data  = phase1
+                st.session_state.running   = False
+            except Exception as e:
+                _render_pdash(pcts, msgs, st.session_state.cur_stage,
+                              status_label="Phase 1 failed", error=True)
+                st.session_state.running = False
+                st.error(f"Pipeline error: {e}")
 
-                try:
-                    phase1 = run_transcribe_and_translate(
-                        video_path=tmp_path,
-                        target_language=st.session_state.sel_lang,
-                        progress_cb=pcb,
-                        generate_srt=opt_srt,
-                        polish_translation=opt_polish,
-                        words_per_subtitle=words_per_sub,
-                    )
-                    status.update(label="✅ Phase 1 complete — review text below", state="complete")
-                    st.session_state.hil_phase = "review"
-                    st.session_state.hil_data  = phase1
-                    st.session_state.running   = False
-                except Exception as e:
-                    st.session_state.running = False
-                    status.update(label="❌ Phase 1 error", state="error")
-                    st.error(f"Pipeline error: {e}")
+        # ── Full one-shot pipeline ────────────────────────────────────
         else:
-            # Normal one-shot pipeline (backwards compatible)
-            with st.status("Starting pipeline…", expanded=True) as status:
-                def pcb(stage, sub_pct, message):
-                    pcts[stage-1] = min(100.0, float(sub_pct))
-                    msgs[stage-1] = message
-                    st.session_state.pcts = pcts
-                    st.session_state.msgs = msgs
-                    st.session_state.cur_stage = stage
-                    label = stages_labels.get(stage, f"Stage {stage}")
-                    status.update(label=label, state="running")
-                    st.write(f"**{label}** – {pcts[stage-1]:.0f}% {('· ' + message) if message else ''}")
-
-                try:
-                    result = run_pipeline(
-                        video_path=tmp_path,
-                        target_language=st.session_state.sel_lang,
-                        progress_cb=pcb,
-                        generate_srt=opt_srt,
-                        polish_translation=opt_polish,
-                        voice_pitch=voice_pitch,
-                        vol_boost=vol_boost,
-                        words_per_subtitle=words_per_sub,
-                    )
-                    status.update(label="✅ Pipeline finished", state="complete")
-                    st.session_state.result    = result
-                    st.session_state.pcts      = [100.0]*5
-                    st.session_state.cur_stage = 6
-                    st.session_state.running   = False
-                    save_history({
-                        "job_id":result.get("job_id"), "language":result.get("language"),
-                        "output_path":result.get("output_path"), "srt_path":result.get("srt_path",""),
-                        "timestamp":datetime.now().isoformat(timespec="seconds"),
-                        "transcript_len":len(result.get("transcript","") or ""),
-                        "translation_len":len(result.get("translation","") or ""),
-                    })
-                    # Clean up temp file after full pipeline
-                    try:
-                        os.unlink(st.session_state.hil_tmp)
-                    except Exception:
-                        pass
-                    st.session_state.hil_tmp = ""
-                    st.rerun()
-                except Exception as e:
-                    st.session_state.running = False
-                    status.update(label="❌ Pipeline error", state="error")
-                    st.error(f"Pipeline error: {e}")
-                    try:
-                        os.unlink(st.session_state.hil_tmp)
-                    except Exception:
-                        pass
-                    st.session_state.hil_tmp = ""
+            try:
+                result = run_pipeline(
+                    video_path=_pipeline_video_path,
+                    video_url=_pipeline_video_url,
+                    target_language=st.session_state.sel_lang,
+                    progress_cb=pcb,
+                    generate_srt=opt_srt,
+                    polish_translation=opt_polish,
+                    voice_pitch=voice_pitch,
+                    vol_boost=vol_boost,
+                )
+                _render_pdash([100.0]*5, msgs, 6,
+                              status_label="Dubbing complete!", done=True)
+                st.session_state.result    = result
+                st.session_state.pcts      = [100.0]*5
+                st.session_state.cur_stage = 6
+                st.session_state.running   = False
+                save_history({
+                    "job_id":result.get("job_id"), "language":result.get("language"),
+                    "output_path":result.get("output_path"), "srt_path":result.get("srt_path",""),
+                    "timestamp":datetime.now().isoformat(timespec="seconds"),
+                    "transcript_len":len(result.get("transcript","") or ""),
+                    "translation_len":len(result.get("translation","") or ""),
+                })
+                if _pipeline_video_path and st.session_state.input_mode == "upload":
+                    try: os.unlink(_pipeline_video_path)
+                    except Exception: pass
+                st.session_state.hil_tmp = ""
+                st.rerun()
+            except Exception as e:
+                _render_pdash(pcts, msgs, st.session_state.cur_stage,
+                              status_label="Pipeline failed", error=True)
+                st.session_state.running = False
+                st.error(f"Pipeline error: {e}")
+                if _pipeline_video_path and st.session_state.input_mode == "upload":
+                    try: os.unlink(_pipeline_video_path)
+                    except Exception: pass
+                st.session_state.hil_tmp = ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1339,45 +1548,101 @@ with t_batch:
     """, unsafe_allow_html=True)
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="sh">📁 Upload Video for Batch</div>', unsafe_allow_html=True)
-    b_up = st.file_uploader("batch_video", type=["mp4","mov","avi","mkv"],
-                             key="bup", label_visibility="collapsed")
+    st.markdown('<div class="sh">📁 Video Source</div>', unsafe_allow_html=True)
 
-    # Estimate duration (seconds) once per upload using ffprobe if available
+    b_input_mode = st.radio(
+        "b_input_mode_radio",
+        options=["📁 Upload File", "🔗 Paste URL"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="b_input_mode_radio",
+    )
+    st.session_state.b_input_mode = "url" if "URL" in b_input_mode else "upload"
+    st.markdown('<hr class="div" style="margin:10px 0">', unsafe_allow_html=True)
+
+    b_up = None
+
+    if st.session_state.b_input_mode == "upload":
+        b_up = st.file_uploader("batch_video", type=["mp4","mov","avi","mkv"],
+                                 key="bup", label_visibility="collapsed")
+        st.session_state.b_url_info = None
+        st.session_state.b_url_text = ""
+    else:
+        b_url_col, b_btn_col = st.columns([4, 1])
+        with b_url_col:
+            b_url_input = st.text_input(
+                "Batch URL", value=st.session_state.b_url_text,
+                placeholder="https://www.youtube.com/watch?v=...",
+                label_visibility="collapsed", key="b_url_text_input",
+            )
+        with b_btn_col:
+            b_fetch_btn = st.button("🔍 Fetch", key="b_fetch_btn",
+                                    disabled=not PIPELINE_READY or not b_url_input.strip())
+        st.session_state.b_url_text = b_url_input
+
+        if b_fetch_btn and b_url_input.strip() and get_video_info:
+            with st.spinner("Fetching video info…"):
+                try:
+                    b_info = get_video_info(b_url_input.strip())
+                    st.session_state.b_url_info = b_info
+                except Exception as e:
+                    st.error(f"❌ {e}")
+                    st.session_state.b_url_info = None
+
+        if st.session_state.b_url_info:
+            b_info    = st.session_state.b_url_info
+            b_dur     = b_info.get("duration")
+            b_dur_str = f"{int(b_dur)//60}m {int(b_dur)%60}s" if b_dur else "Unknown"
+            st.markdown(f"""
+            <div style="font-size:13px;color:var(--tx2);margin:8px 0 2px">
+              🎬 <b>{b_info.get('title','')[:70]}</b><br>
+              <span style="color:var(--tx3)">
+                🌐 {b_info.get('platform','')}
+                {f"· 👤 {b_info.get('uploader','')}" if b_info.get('uploader') else ''}
+                · ⏱️ {b_dur_str}
+              </span>
+            </div>
+            <div style="margin-top:6px">
+              <span class="chip chip-on">✅ Ready — will fetch per language when batch starts</span>
+            </div>""", unsafe_allow_html=True)
+
+    # Batch video ready: upload needs file, URL just needs info fetched
+    b_video_ready = (
+        (st.session_state.b_input_mode == "upload" and b_up is not None) or
+        (st.session_state.b_input_mode == "url"    and st.session_state.b_url_info is not None)
+    )
+
+    # Estimate duration for ETA display
     batch_eta_info = None
-    if b_up is not None:
+    if b_video_ready:
         if "batch_video_seconds" not in st.session_state:
             st.session_state.batch_video_seconds = None
         if st.session_state.batch_video_seconds is None:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmpv:
-                tmpv.write(b_up.getvalue())
-                tmp_path_eta = tmpv.name
-            try:
-                # ffprobe must be on PATH; if not, we silently skip ETA
-                out = subprocess.check_output(
-                    [
-                        "ffprobe",
-                        "-v",
-                        "error",
-                        "-show_entries",
-                        "format=duration",
-                        "-of",
-                        "default=noprint_wrappers=1:nokey=1",
-                        tmp_path_eta,
-                    ],
-                    stderr=subprocess.STDOUT,
-                )
-                st.session_state.batch_video_seconds = float(out.decode().strip())
-            except Exception:
-                st.session_state.batch_video_seconds = None
-            finally:
+            if st.session_state.b_input_mode == "url":
+                # Duration already known from get_video_info — no ffprobe needed
+                st.session_state.batch_video_seconds = (
+                    st.session_state.b_url_info or {}
+                ).get("duration")
+            elif b_up is not None:
+                # Upload mode: run ffprobe on the temp file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmpv:
+                    tmpv.write(b_up.getvalue())
+                    tmp_path_eta = tmpv.name
                 try:
-                    os.unlink(tmp_path_eta)
+                    out = subprocess.check_output(
+                        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                         "-of", "default=noprint_wrappers=1:nokey=1", tmp_path_eta],
+                        stderr=subprocess.STDOUT,
+                    )
+                    st.session_state.batch_video_seconds = float(out.decode().strip())
                 except Exception:
-                    pass
+                    st.session_state.batch_video_seconds = None
+                finally:
+                    try: os.unlink(tmp_path_eta)
+                    except Exception: pass
 
         if st.session_state.batch_video_seconds:
-            approx_mult = 1.3  # conservative safety factor
+            approx_mult = 1.3
             batch_eta_info = (st.session_state.batch_video_seconds, approx_mult)
             est_minutes = (st.session_state.batch_video_seconds * approx_mult) / 60.0
             st.markdown(
@@ -1408,13 +1673,19 @@ with t_batch:
 
     batch_btn = st.button(
         f"⚡  Run Batch — {n_sel} language{'s' if n_sel!=1 else ''}",
-        disabled=not PIPELINE_READY or n_sel == 0 or b_up is None,
+        disabled=not PIPELINE_READY or n_sel == 0 or not b_video_ready,
         key="batch_run"
     )
 
-    if batch_btn and b_up and PIPELINE_READY and n_sel > 0:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-            tmp.write(b_up.getvalue()); btmp = tmp.name
+    if batch_btn and b_video_ready and PIPELINE_READY and n_sel > 0:
+        # Build source args
+        if st.session_state.b_input_mode == "url":
+            btmp            = ""
+            _batch_video_url = st.session_state.b_url_text.strip()
+        else:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+                tmp.write(b_up.getvalue()); btmp = tmp.name
+            _batch_video_url = ""
 
         batch_results = []; total = st.session_state.batch_langs
         o_ph = st.empty()
@@ -1453,7 +1724,13 @@ with t_batch:
                     )
 
             try:
-                r = run_pipeline(btmp, lang, progress_cb=bcb, generate_srt=True, words_per_subtitle=8)
+                r = run_pipeline(
+                    video_path=btmp,
+                    video_url=_batch_video_url,
+                    target_language=lang,
+                    progress_cb=bcb,
+                    generate_srt=True,
+                )
                 batch_results.append(r); l_phs[lang].success(f"✅ {lang} done")
                 save_history({"job_id":r.get("job_id"),"language":lang,
                               "output_path":r.get("output_path"),"srt_path":r.get("srt_path",""),
@@ -1465,8 +1742,9 @@ with t_batch:
 
         o_ph.success(f"🎉 Batch complete — {len(batch_results)}/{len(total)} succeeded.")
         st.session_state.batch_results = batch_results
-        try: os.unlink(btmp)
-        except: pass
+        if btmp:   # Only set in upload mode
+            try: os.unlink(btmp)
+            except: pass
 
     if st.session_state.batch_results:
         st.markdown('<hr class="div">', unsafe_allow_html=True)

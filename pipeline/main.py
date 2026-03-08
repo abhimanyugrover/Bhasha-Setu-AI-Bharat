@@ -40,23 +40,30 @@ log = logging.getLogger(__name__)
 
 
 def run_transcribe_and_translate(
-    video_path:          str,
-    target_language:     str,
+    video_path:         str  = "",
+    target_language:    str  = "",
     progress_cb=None,
-    generate_srt:        bool = False,
-    polish_translation:  bool = False,
-    words_per_subtitle:  int = 8,
+    generate_srt:       bool = False,
+    polish_translation: bool = False,
+    video_url:          str  = "",
 ) -> dict:
     """
     Phase 1 of the pipeline for human-in-the-loop review:
     upload → transcribe → translate (±LLM polish) → optional SRT.
 
-    Returns a dict with transcript, translation, and SRT path,
-    but does NOT run TTS or muxing.
+    Accepts either a local video_path OR a video_url (YouTube etc.).
+    When video_url is provided, the video is fetched silently in Stage 1.
+
+    Returns a dict with transcript, translation, SRT path, and video_path
+    (which may be a temp file when video_url was used — HIL Phase 2 needs it).
     """
     _setup_logging()
 
-    if not os.path.exists(video_path):
+    # Resolve input source
+    _url_mode    = bool(video_url and not video_path)
+    _temp_to_del = ""   # Track temp file created for URL mode
+
+    if not _url_mode and not os.path.exists(video_path):
         raise FileNotFoundError(f"Video not found: {video_path}")
     if target_language not in LANGUAGES:
         raise ValueError(
@@ -67,7 +74,8 @@ def run_transcribe_and_translate(
     job_id    = uuid.uuid4().hex[:8]
     lang_cfg  = LANGUAGES[target_language]
     lang_code = lang_cfg["aws_translate_code"]
-    log.info(f"=== HIL PHASE-1 {job_id} | {target_language} | {video_path} ===")
+    src_label = video_url if _url_mode else video_path
+    log.info(f"=== HIL PHASE-1 {job_id} | {target_language} | {src_label} ===")
 
     def _prog(stage: int, pct: float, msg: str):
         log.info(f"[Stage {stage}/5 | {pct:.0f}%] {msg}")
@@ -77,10 +85,22 @@ def run_transcribe_and_translate(
             except Exception:
                 pass
 
-    # Stage 1: Upload
-    _prog(1, 10, "Connecting to S3…")
+    # Stage 1: Fetch / Upload
+    if _url_mode:
+        _prog(1, 5, "Connecting to video source…")
+
+        def _dl_prog(pct: float, msg: str):
+            _prog(1, 5 + pct * 0.6, msg)   # Map 0-100 → 5-65%
+
+        from pipeline.downloader import download_to_temp
+        video_path   = download_to_temp(video_url, progress_cb=_dl_prog)
+        _temp_to_del = video_path
+        _prog(1, 70, f"Uploading to S3…")
+    else:
+        _prog(1, 10, "Connecting to S3…")
+        _prog(1, 40, f"Uploading {os.path.basename(video_path)}…")
+
     s3_key = f"inputs/{job_id}_{os.path.basename(video_path)}"
-    _prog(1, 40, f"Uploading {os.path.basename(video_path)}…")
     s3_uri = upload_to_s3(video_path, s3_key)
     _prog(1, 100, f"Uploaded → {s3_uri}")
     log.info(f"S3 URI: {s3_uri}")
@@ -100,7 +120,7 @@ def run_transcribe_and_translate(
     log.info(f"Transcript ({len(transcript)} chars): {transcript[:120]}…")
 
     # Stage 3: Translate
-    _prog(3, 5, f"Splitting text into chunks…")
+    _prog(3, 5, "Splitting text into chunks…")
 
     def translate_progress(chunk_i: int, total_chunks: int):
         pct = 10 + (chunk_i / max(1, total_chunks)) * 75
@@ -130,18 +150,19 @@ def run_transcribe_and_translate(
         try:
             from pipeline.transcribe import generate_srt_file
             srt_path = os.path.join(OUTPUT_DIR, f"{job_id}_subtitles.srt")
-            generate_srt_file(word_timestamps, srt_path, words_per_subtitle=words_per_subtitle)
+            generate_srt_file(word_timestamps, srt_path)
             log.info(f"SRT written: {srt_path}")
         except Exception as e:
             log.warning(f"SRT generation failed (non-fatal): {e}")
 
     return {
         "job_id":      job_id,
-        "video_path":  video_path,
+        "video_path":  video_path,      # temp path if URL mode — HIL phase 2 needs this
         "language":    target_language,
         "transcript":  transcript,
         "translation": translation,
         "srt_path":    srt_path,
+        "_temp_path":  _temp_to_del,    # pipeline will clean this up after mux
     }
 
 
@@ -226,41 +247,41 @@ def run_tts_and_mux(
 
 
 def run_pipeline(
-    video_path:          str,
-    target_language:     str,
+    video_path:          str  = "",
+    target_language:     str  = "",
     progress_cb=None,
     generate_srt:        bool = False,
     polish_translation:  bool = False,
-    voice_pitch:         int = 0,
+    voice_pitch:         int  = 0,
     vol_boost:           float = 2.0,
-    words_per_subtitle:  int = 8,
+    video_url:           str  = "",
 ) -> dict:
     """
     Run the full Bhasha-Setu dubbing pipeline.
 
+    Accepts either:
+      video_path  — local MP4 file (upload mode)
+      video_url   — YouTube / Vimeo / etc. URL (fetched silently in Stage 1)
+
     Args:
-        video_path:         Local path to the source English MP4 video.
+        video_path:         Local path to source video (upload mode).
         target_language:    Target language name (e.g. "Hindi", "Tamil").
-        progress_cb:        Optional callable(stage: int, sub_pct: float, message: str).
-                            stage 1-5 maps to Upload/Transcribe/Translate/Synthesize/Mux.
-                            sub_pct is 0-100 within each stage.
-        generate_srt:       If True, generate an .srt subtitle file from transcription timestamps.
-        polish_translation: If True, run an LLM pass to improve translation naturalness.
-        voice_pitch:        Pitch shift in percent (-20..+20). Polly uses SSML, edge-tts uses Hz.
-        vol_boost:          Volume multiplier for dubbed audio (default 2.0 = double).
+        progress_cb:        Optional callable(stage, sub_pct, message).
+        generate_srt:       Generate .srt subtitle file.
+        polish_translation: LLM pass to improve translation naturalness.
+        voice_pitch:        Pitch shift percent (-20..+20).
+        vol_boost:          Volume multiplier (default 2.0).
+        video_url:          Public video URL (URL mode — skip video_path).
 
     Returns:
-        dict with keys:
-            output_path      : path to the final dubbed MP4
-            transcript       : original English transcript
-            translation      : translated text
-            job_id           : unique job identifier
-            language         : target language name
-            srt_path         : path to .srt file (or empty string if not generated)
+        dict: output_path, transcript, translation, job_id, language, srt_path
     """
     _setup_logging()
 
-    if not os.path.exists(video_path):
+    _url_mode    = bool(video_url and not video_path)
+    _temp_to_del = ""   # temp file created when using URL mode
+
+    if not _url_mode and not os.path.exists(video_path):
         raise FileNotFoundError(f"Video not found: {video_path}")
     if target_language not in LANGUAGES:
         raise ValueError(
@@ -268,10 +289,11 @@ def run_pipeline(
             f"Choose from: {list(LANGUAGES.keys())}"
         )
 
-    job_id    = uuid.uuid4().hex[:8]
-    lang_cfg  = LANGUAGES[target_language]
+    job_id   = uuid.uuid4().hex[:8]
+    lang_cfg = LANGUAGES[target_language]
     lang_code = lang_cfg["aws_translate_code"]
-    log.info(f"=== JOB {job_id} | {target_language} | {video_path} ===")
+    src_label = video_url if _url_mode else video_path
+    log.info(f"=== JOB {job_id} | {target_language} | {src_label} ===")
 
     def _prog(stage: int, pct: float, msg: str):
         log.info(f"[Stage {stage}/5 | {pct:.0f}%] {msg}")
@@ -279,12 +301,24 @@ def run_pipeline(
             try:
                 progress_cb(stage, pct, msg)
             except Exception:
-                pass  # Never let a UI error kill the pipeline
+                pass
 
-    # ── Stage 1: Upload ──────────────────────────────────────────────
-    _prog(1, 10, "Connecting to S3…")
+    # ── Stage 1: Fetch (if URL) + Upload ────────────────────────────
+    if _url_mode:
+        _prog(1, 5, "Connecting to video source…")
+
+        def _dl_prog(pct: float, msg: str):
+            _prog(1, 5 + pct * 0.60, msg)  # Map 0-100% → 5-65%
+
+        from pipeline.downloader import download_to_temp
+        video_path   = download_to_temp(video_url, progress_cb=_dl_prog)
+        _temp_to_del = video_path
+        _prog(1, 70, "Uploading to S3…")
+    else:
+        _prog(1, 10, "Connecting to S3…")
+        _prog(1, 40, f"Uploading {os.path.basename(video_path)}…")
+
     s3_key = f"inputs/{job_id}_{os.path.basename(video_path)}"
-    _prog(1, 40, f"Uploading {os.path.basename(video_path)}…")
     s3_uri = upload_to_s3(video_path, s3_key)
     _prog(1, 100, f"Uploaded → {s3_uri}")
     log.info(f"S3 URI: {s3_uri}")
@@ -334,7 +368,7 @@ def run_pipeline(
         try:
             from pipeline.transcribe import generate_srt_file
             srt_path = os.path.join(OUTPUT_DIR, f"{job_id}_subtitles.srt")
-            generate_srt_file(word_timestamps, srt_path, words_per_subtitle=words_per_subtitle)
+            generate_srt_file(word_timestamps, srt_path)
             log.info(f"SRT written: {srt_path}")
         except Exception as e:
             log.warning(f"SRT generation failed (non-fatal): {e}")
@@ -371,6 +405,18 @@ def run_pipeline(
         os.remove(mp3_path)
     except Exception:
         pass
+
+    # Cleanup URL temp file (downloaded video — no longer needed after mux)
+    if _temp_to_del and os.path.exists(_temp_to_del):
+        try:
+            os.remove(_temp_to_del)
+            # Also try to remove the parent temp dir if empty
+            import shutil
+            parent = os.path.dirname(_temp_to_del)
+            if parent and os.path.isdir(parent):
+                shutil.rmtree(parent, ignore_errors=True)
+        except Exception:
+            pass
 
     log.info(f"=== JOB {job_id} COMPLETE === Output: {output_path}")
     return {
