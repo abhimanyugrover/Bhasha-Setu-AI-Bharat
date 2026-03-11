@@ -19,7 +19,7 @@ from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
-MAX_HEIGHT = 720   # Cap at 720p — enough for dubbing, avoids huge 4K files
+MAX_HEIGHT = 720
 
 _PLATFORM_MAP = {
     "youtube":     "YouTube",
@@ -41,6 +41,13 @@ _FORMAT = (
     f"/best"
 )
 
+# Realistic Chrome user-agent — avoids most platform bot-detection
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
+
 
 def _platform(info: dict) -> str:
     extractor = info.get("extractor_key", "").lower()
@@ -58,8 +65,40 @@ def _friendly_error(e) -> str:
     if "removed"          in msg.lower(): return "This video has been removed."
     if "copyright"        in msg.lower(): return "Video unavailable due to copyright restrictions."
     if "confirm your age" in msg.lower(): return "This video requires sign-in to watch."
+    if "403"              in msg: return "YouTube blocked the request (403). Try updating yt-dlp: pip install --upgrade yt-dlp"
     return f"Could not access video: {msg[:200]}"
 
+
+def _make_opts(extra: dict = {}) -> dict:
+    """Base yt-dlp options shared by all calls."""
+    return {
+        "quiet":       True,
+        "no_warnings": True,
+        "noplaylist":  True,
+        "http_headers": {"User-Agent": _UA},
+        **extra,
+    }
+
+
+def _with_cookie_fallback(build_opts_fn, run_fn):
+    """
+    Try run_fn(opts_with_chrome_cookies), fall back to run_fn(opts_without_cookies)
+    if Chrome is not installed or cookies can't be read.
+    """
+    try:
+        opts = build_opts_fn(cookies=True)
+        return run_fn(opts)
+    except Exception as e:
+        err = str(e).lower()
+        # If the error is about cookies/browser, retry without them
+        if any(w in err for w in ("chrome", "cookie", "browser", "keyring")):
+            log.warning(f"Cookie read failed ({e}), retrying without cookies…")
+            opts = build_opts_fn(cookies=False)
+            return run_fn(opts)
+        raise
+
+
+# ── Public: metadata fetch ────────────────────────────────────────────────────
 
 def get_video_info(url: str) -> dict:
     """
@@ -76,26 +115,34 @@ def get_video_info(url: str) -> dict:
     except ImportError:
         raise RuntimeError("yt-dlp not installed. Run: pip install yt-dlp")
 
-    opts = {
-        "quiet": True, "no_warnings": True,
-        "skip_download": True, "noplaylist": True,
-    }
-    try:
+    def _build(cookies: bool):
+        o = _make_opts({"skip_download": True})
+        if cookies:
+            o["cookiesfrombrowser"] = ("chrome",)
+        return o
+
+    def _run(opts):
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if not info:
                 raise ValueError("Could not fetch video information.")
-            return {
-                "title":     info.get("title", "Untitled Video"),
-                "duration":  info.get("duration"),
-                "thumbnail": info.get("thumbnail"),
-                "uploader":  info.get("uploader") or info.get("channel"),
-                "platform":  _platform(info),
-                "url":       url,
-            }
+            return info
+
+    try:
+        info = _with_cookie_fallback(_build, _run)
+        return {
+            "title":     info.get("title", "Untitled Video"),
+            "duration":  info.get("duration"),
+            "thumbnail": info.get("thumbnail"),
+            "uploader":  info.get("uploader") or info.get("channel"),
+            "platform":  _platform(info),
+            "url":       url,
+        }
     except yt_dlp.utils.DownloadError as e:
         raise ValueError(_friendly_error(e))
 
+
+# ── Public: download to temp ──────────────────────────────────────────────────
 
 def download_to_temp(
     url:         str,
@@ -105,8 +152,7 @@ def download_to_temp(
     Download a video from URL to a system temp file. Returns the local path.
 
     The CALLER must delete the file after use.
-    The pipeline's Stage 1 calls this then immediately uploads to S3
-    and holds the temp file until Stage 5 (mux) completes, then deletes it.
+    The pipeline's Stage 1 calls this then immediately uploads to S3.
 
     Args:
         url:         Public video URL.
@@ -147,45 +193,56 @@ def download_to_temp(
         elif status == "finished":
             progress_cb(97.0, "Merging audio & video streams…")
 
-    opts = {
-        "format":              _FORMAT,
-        "outtmpl":             out_tmpl,
-        "quiet":               True,
-        "no_warnings":         True,
-        "noplaylist":          True,
-        "progress_hooks":      [_hook],
-        "merge_output_format": "mp4",
-    }
+    def _build(cookies: bool):
+        o = _make_opts({
+            "format":              _FORMAT,
+            "outtmpl":             out_tmpl,
+            "progress_hooks":      [_hook],
+            "merge_output_format": "mp4",
+            "retries":             5,
+            "fragment_retries":    5,
+        })
+        if cookies:
+            o["cookiesfrombrowser"] = ("chrome",)
+        return o
+
+    def _run(opts):
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=True)
 
     try:
         if progress_cb:
             progress_cb(0.0, "Connecting to video source…")
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if not info:
-                raise ValueError("Download returned no information.")
+        info = _with_cookie_fallback(_build, _run)
 
-            actual = ydl.prepare_filename(info)
-            if not actual.endswith(".mp4"):
-                mp4 = os.path.splitext(actual)[0] + ".mp4"
-                actual = mp4 if os.path.exists(mp4) else actual
+        if not info:
+            raise ValueError("Download returned no information.")
 
-            if not os.path.exists(actual):
-                mp4s = sorted(
-                    [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
-                     if f.endswith(".mp4")],
-                    key=os.path.getmtime,
-                )
-                if not mp4s:
-                    raise RuntimeError("Download finished but output file not found.")
-                actual = mp4s[-1]
+        # Find the output file in tmp_dir
+        mp4s = sorted(
+            [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
+             if f.endswith(".mp4")],
+            key=os.path.getmtime,
+        )
+        if not mp4s:
+            # Check for any video file if mp4 merge didn't happen
+            all_vids = sorted(
+                [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
+                 if os.path.splitext(f)[1] in (".mp4", ".mkv", ".webm")],
+                key=os.path.getmtime,
+            )
+            if not all_vids:
+                raise RuntimeError("Download finished but no output file found.")
+            actual = all_vids[-1]
+        else:
+            actual = mp4s[-1]
 
-            size_mb = os.path.getsize(actual) / (1024 * 1024)
-            if progress_cb:
-                progress_cb(100.0, f"Video ready — {size_mb:.1f} MB")
-            log.info(f"Temp download: {actual} ({size_mb:.1f} MB)")
-            return actual
+        size_mb = os.path.getsize(actual) / (1024 * 1024)
+        if progress_cb:
+            progress_cb(100.0, f"Video ready — {size_mb:.1f} MB")
+        log.info(f"Temp download: {actual} ({size_mb:.1f} MB)")
+        return actual
 
     except yt_dlp.utils.DownloadError as e:
         raise ValueError(_friendly_error(e))
