@@ -5,14 +5,13 @@ All AWS settings, language registry, and TTS engine assignments.
 TTS Engine Strategy (quality + cost analysis):
   • Polly  (Kajal neural) → Hindi only           — best quality, proven
   • edge-tts (MS neural, FREE) → 8 languages     — high quality, zero cost
-  • gTTS   (Google, FREE) → Punjabi, Odia, Assamese
-      Punjabi: pa-IN-VaaniNeural is Azure-only, not reachable via free edge-tts.
-      Odia/Assamese: no edge-tts voices exist for these languages.
+  • gTTS   (Google, FREE) → Odia, Assamese       — edge-tts doesn't support these
 """
 
 # ── AWS Settings ─────────────────────────────────────────────────────
-AWS_REGION = "ap-south-1"
-S3_BUCKET  = "bhasha-setu-videos"
+AWS_REGION     = "ap-south-1"   # S3, Transcribe, Translate, Polly
+BEDROCK_REGION = "us-east-1"    # Bedrock Claude models only available here
+S3_BUCKET      = "bhasha-setu-videos"
 
 # ── Directory Paths ──────────────────────────────────────────────────
 CACHE_DIR  = "cache"
@@ -96,13 +95,10 @@ LANGUAGES = {
         "flag":               "🇮🇳",
         "native_name":        "ગુજરાતી",
     },
-    # NOTE: pa-IN-VaaniNeural / pa-IN-OjasNeural are Azure Cognitive Services voices
-    # and are NOT exposed by the free edge-tts Python library endpoint. Using gTTS
-    # which reliably supports Punjabi (Gurmukhi script, ISO 639-1 code "pa").
     "Punjabi": {
         "aws_translate_code": "pa",
-        "tts":                "gtts",
-        "gtts_lang":          "pa",
+        "tts":                "edge",
+        "edge_voice":         "pa-IN-VaaniNeural",
         "flag":               "🇮🇳",
         "native_name":        "ਪੰਜਾਬੀ",
     },

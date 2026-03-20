@@ -119,6 +119,18 @@ def run_transcribe_and_translate(
     _prog(2, 100, f"Transcript ready ({len(transcript)} chars)")
     log.info(f"Transcript ({len(transcript)} chars): {transcript[:120]}…")
 
+    # Guard: empty transcript means no speech detected
+    if not transcript or not transcript.strip():
+        raise ValueError(
+            "No speech detected in this video.\n\n"
+            "Possible reasons:\n"
+            "• The video has background music but no spoken words\n"
+            "• It is a YouTube Short with sound effects only\n"
+            "• The audio is in a language other than English\n"
+            "• The audio is too quiet or muffled\n\n"
+            "Please use a video with clear English speech (lecture, talk, tutorial, news)."
+        )
+
     # Stage 3: Translate
     _prog(3, 5, "Splitting text into chunks…")
 
@@ -175,6 +187,7 @@ def run_tts_and_mux(
     srt_path:        str = "",
     voice_pitch:     int = 0,
     vol_boost:       float = 2.0,
+    bg_music_vol:    float = 0.0,
 ) -> dict:
     """
     Phase 2 of the pipeline for human-in-the-loop:
@@ -228,7 +241,7 @@ def run_tts_and_mux(
         _prog(5, step_pct, msg)
 
     output_path = os.path.join(OUTPUT_DIR, f"{job_id}_dubbed.mp4")
-    mux(video_path, mp3_path, output_path, progress_cb=mux_progress, vol_boost=vol_boost)
+    mux(video_path, mp3_path, output_path, progress_cb=mux_progress, vol_boost=vol_boost, bg_music_vol=bg_music_vol)
     _prog(5, 100, f"Mux complete → {os.path.basename(output_path)}")
 
     try:
@@ -255,6 +268,7 @@ def run_pipeline(
     voice_pitch:         int  = 0,
     vol_boost:           float = 2.0,
     video_url:           str  = "",
+    bg_music_vol:        float = 0.0,
 ) -> dict:
     """
     Run the full Bhasha-Setu dubbing pipeline.
@@ -337,6 +351,18 @@ def run_pipeline(
     _prog(2, 100, f"Transcript ready ({len(transcript)} chars)")
     log.info(f"Transcript ({len(transcript)} chars): {transcript[:120]}…")
 
+    # Guard: empty transcript means no speech detected
+    if not transcript or not transcript.strip():
+        raise ValueError(
+            "No speech detected in this video.\n\n"
+            "Possible reasons:\n"
+            "• The video has background music but no spoken words\n"
+            "• It is a YouTube Short with sound effects only\n"
+            "• The audio is in a language other than English\n"
+            "• The audio is too quiet or muffled\n\n"
+            "Please use a video with clear English speech (lecture, talk, tutorial, news)."
+        )
+
     # ── Stage 3: Translate ───────────────────────────────────────────
     _prog(3, 5, f"Splitting text into chunks…")
 
@@ -397,7 +423,7 @@ def run_pipeline(
         _prog(5, step_pct, msg)
 
     output_path = os.path.join(OUTPUT_DIR, f"{job_id}_dubbed.mp4")
-    mux(video_path, mp3_path, output_path, progress_cb=mux_progress, vol_boost=vol_boost)
+    mux(video_path, mp3_path, output_path, progress_cb=mux_progress, vol_boost=vol_boost, bg_music_vol=bg_music_vol)
     _prog(5, 100, f"Mux complete → {os.path.basename(output_path)}")
 
     # Cleanup intermediate MP3

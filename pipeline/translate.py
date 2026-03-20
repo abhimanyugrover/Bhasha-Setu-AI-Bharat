@@ -13,7 +13,7 @@ import boto3
 from botocore.exceptions import ClientError
 from deep_translator import GoogleTranslator
 
-from pipeline.config import AWS_REGION, TRANSLATE_CHUNK_BYTES
+from pipeline.config import AWS_REGION, BEDROCK_REGION, TRANSLATE_CHUNK_BYTES
 
 log = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ def polish_translation_with_llm(
         Polished translated text, or the original if polishing fails.
     """
     try:
-        client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+        client = boto3.client("bedrock-runtime", region_name=BEDROCK_REGION)
 
         context_block = ""
         if original_english:

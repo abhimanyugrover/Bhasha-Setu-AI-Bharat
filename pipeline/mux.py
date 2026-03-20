@@ -1,9 +1,9 @@
 """
 Bhasha-Setu — Audio-Video Mux Service
 Merges dubbed audio with original video using FFmpeg.
-Reports granular step-by-step progress (0-100).
+Supports optional background music mixing from the original video.
 
-Pipeline: MP3 → WAV → atempo speed-match → AAC encode → MP4 merge
+Pipeline: MP3 → WAV → atempo speed-match → (optional mix with BG) → AAC encode → MP4
 """
 
 import subprocess
@@ -30,7 +30,6 @@ def get_duration(path: str) -> float:
         "-of", "default=noprint_wrappers=1:nokey=1",
         path
     ], capture_output=True, text=True)
-
     out = result.stdout.strip()
     if not out or result.returncode != 0:
         raise RuntimeError(
@@ -40,8 +39,20 @@ def get_duration(path: str) -> float:
     return float(out)
 
 
+def _has_audio(path: str) -> bool:
+    """Return True if the video file has at least one audio stream."""
+    result = subprocess.run([
+        "ffprobe", "-v", "error",
+        "-select_streams", "a",
+        "-show_entries", "stream=index",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        path
+    ], capture_output=True, text=True)
+    return bool(result.stdout.strip())
+
+
 def _mp3_to_wav(mp3_path: str) -> str:
-    """Convert MP3 → WAV (PCM 16-bit, 44100 Hz, mono) for reliable FFmpeg processing."""
+    """Convert MP3 → WAV (PCM 16-bit, 44100 Hz, mono)."""
     wav_path = mp3_path.replace(".mp3", "_raw.wav")
     _run([
         "ffmpeg", "-y",
@@ -57,33 +68,21 @@ def _mp3_to_wav(mp3_path: str) -> str:
 def _build_atempo_chain(ratio: float, vol_boost: float = 2.0) -> list[str]:
     """
     Build FFmpeg atempo filter chain for speed adjustment + volume boost.
-
-    atempo = audio_dur / video_dur:
-      < 1.0  → slows audio DOWN  → stretches to fill longer video
-      > 1.0  → speeds audio UP   → shrinks to fit shorter video
-      Each atempo value must be in [0.5, 2.0].
-
-    vol_boost: volume multiplier (1.0 = no change, 2.0 = double, 4.0 = max UI value)
+    Each atempo value must be in [0.5, 2.0].
     """
     filters = []
     r = ratio
-
     while r > 2.0:
         filters.append("atempo=2.0")
         r /= 2.0
-
     while r < 0.5:
         filters.append("atempo=0.5")
         r /= 0.5
-
     if abs(r - 1.0) > 0.005:
         filters.append(f"atempo={r:.6f}")
-
-    # Volume boost: clamp to safe FFmpeg range [0.1, 8.0]
     safe_vol = max(0.1, min(8.0, float(vol_boost)))
     filters.append(f"volume={safe_vol:.2f}")
     filters.append("aresample=44100")
-
     return filters
 
 
@@ -92,7 +91,6 @@ def _adjust_speed(wav_path: str, ratio: float, vol_boost: float = 2.0) -> str:
     adj_path = wav_path.replace("_raw.wav", "_adj.wav")
     filter_str = ",".join(_build_atempo_chain(ratio, vol_boost))
     log.info(f"Speed ratio: {ratio:.4f} | Volume: {vol_boost:.2f}x | Filter: {filter_str}")
-
     _run([
         "ffmpeg", "-y",
         "-i", wav_path,
@@ -101,7 +99,6 @@ def _adjust_speed(wav_path: str, ratio: float, vol_boost: float = 2.0) -> str:
         "-ac", "1",
         adj_path
     ], "Audio speed adjustment")
-
     return adj_path
 
 
@@ -111,24 +108,27 @@ def mux(
     output_path: str,
     progress_cb: Optional[Callable[[float, str], None]] = None,
     vol_boost: float = 2.0,
+    bg_music_vol: float = 0.0,
 ) -> str:
     """
     Merge dubbed audio (MP3) with original video.
 
-    Pipeline steps with progress reporting:
+    Pipeline steps:
       10% — MP3 → WAV conversion
       30% — Duration analysis
       60% — Speed / tempo adjustment
+      75% — Background music mix (if enabled)
       85% — Final merge
      100% — Verification & done
 
     Args:
-        video_path:  Original video file (.mp4).
-        mp3_path:    Dubbed audio (.mp3).
-        output_path: Final dubbed video path (.mp4).
-        progress_cb: Optional callable(pct: float, message: str).
-        vol_boost:   Volume multiplier for dubbed audio (default 2.0 = double volume).
-                     Range [0.5, 4.0] as exposed by the UI slider.
+        video_path:   Original video file (.mp4).
+        mp3_path:     Dubbed audio (.mp3).
+        output_path:  Final dubbed video path (.mp4).
+        progress_cb:  Optional callable(pct: float, message: str).
+        vol_boost:    Volume multiplier for dubbed voice (default 2.0).
+        bg_music_vol: Background music volume from original video (0.0 = off, 0.15 = 15%).
+                      When > 0 the original audio is mixed in behind the dubbed voice.
 
     Returns:
         output_path
@@ -151,32 +151,70 @@ def mux(
     diff_pct  = abs(1.0 - audio_dur / video_dur) * 100
     log.info(f"Video={video_dur:.2f}s | Audio={audio_dur:.2f}s | Diff={diff_pct:.1f}%")
 
-    # CORRECT ratio: audio/video → atempo < 1 stretches, > 1 shrinks
     ratio = audio_dur / video_dur
     _p(45, f"Speed ratio: {ratio:.3f} (audio {audio_dur:.1f}s → video {video_dur:.1f}s)")
 
     # Step 3: Speed adjustment
     _p(55, f"Applying tempo & volume filters (boost={vol_boost:.1f}x)…")
-    adj_wav  = _adjust_speed(wav_path, ratio, vol_boost)
-    adj_dur  = get_duration(adj_wav)
+    adj_wav = _adjust_speed(wav_path, ratio, vol_boost)
+    adj_dur = get_duration(adj_wav)
     log.info(f"Adjusted audio: {adj_dur:.2f}s (target: {video_dur:.2f}s)")
 
-    # Step 4: Final merge
-    _p(75, "Merging dubbed audio with video…")
-    _run([
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-i", adj_wav,
-        "-map", "0:v:0",
-        "-map", "1:a:0",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ar", "44100",
-        "-t", str(video_dur),      # Explicit duration = original video length
-        "-movflags", "+faststart",
-        output_path
-    ], "Audio-video merge")
+    # Step 4: Decide merge strategy
+    use_bg = (
+        bg_music_vol > 0.0
+        and _has_audio(video_path)
+    )
+
+    if use_bg:
+        # ── Mix dubbed voice + original background music ──────────────
+        _p(70, f"Mixing background music at {bg_music_vol:.0%} volume…")
+        safe_bg = max(0.01, min(1.0, float(bg_music_vol)))
+
+        # filter_complex:
+        #   [0:a] = original video audio → lower to bg_music_vol
+        #   [1:a] = dubbed voice (already boosted) → keep as-is
+        #   amix both, duration=first (= video duration), normalize off
+        filter_complex = (
+            f"[0:a]volume={safe_bg:.3f},aresample=44100[bg];"
+            f"[1:a]aresample=44100[dub];"
+            f"[dub][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[out]"
+        )
+
+        _p(80, "Merging video + dubbed voice + background music…")
+        _run([
+            "ffmpeg", "-y",
+            "-i", video_path,   # 0: video + original audio
+            "-i", adj_wav,      # 1: dubbed voice
+            "-filter_complex", filter_complex,
+            "-map", "0:v:0",
+            "-map", "[out]",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "44100",
+            "-t", str(video_dur),
+            "-movflags", "+faststart",
+            output_path
+        ], "Audio-video merge with background music")
+
+    else:
+        # ── Dubbed voice only (original behaviour) ────────────────────
+        _p(75, "Merging dubbed audio with video…")
+        _run([
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-i", adj_wav,
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "44100",
+            "-t", str(video_dur),
+            "-movflags", "+faststart",
+            output_path
+        ], "Audio-video merge")
 
     # Cleanup temp files
     _p(90, "Cleaning up temp files…")
@@ -192,7 +230,9 @@ def mux(
 
     out_size = os.path.getsize(output_path) / (1024 * 1024)
     out_dur  = get_duration(output_path)
-    _p(100, f"Done! {out_size:.1f} MB, {out_dur:.1f}s")
+    bg_note  = f" (background music: {bg_music_vol:.0%})" if use_bg else ""
+    _p(100, f"Done! {out_size:.1f} MB, {out_dur:.1f}s{bg_note}")
     log.info(f"Mux complete: {output_path} ({out_size:.1f} MB, {out_dur:.2f}s)")
 
     return output_path
+
