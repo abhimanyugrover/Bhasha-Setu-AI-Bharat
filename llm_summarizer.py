@@ -1,18 +1,18 @@
 """
 Bhasha Setu — LLM Transcript Summarizer
-Generates a concise summary of the English transcript shown in the results panel.
+Generates a concise summary of the transcript shown in the results panel.
 
-Backend priority:
+Uses Groq (llama-3.1-8b-instant) — free, no card needed.
+Reuses the same GROQ_API_KEY already configured for the AI chat feature.
+
+Fallback chain:
   1. Groq (llama-3.1-8b-instant) — free tier, very fast
-  2. Google Gemini (gemini-1.5-flash) — free tier
-  3. AWS Bedrock Claude Haiku  — reuses existing AWS creds
-  4. Returns None silently if no backend is configured
+  2. Google Gemini (gemini-1.5-flash) — free tier (optional)
+  3. Returns None silently if no backend is configured
 
-Configuration (any one is enough):
-  Set environment variables OR place them in .streamlit/secrets.toml:
-    GROQ_API_KEY      = "gsk_..."
-    GEMINI_API_KEY    = "AIza..."
-  AWS Bedrock uses the same boto3 credentials as the rest of the pipeline.
+Configuration — add ANY ONE of these to .streamlit/secrets.toml:
+  GROQ_API_KEY   = "gsk_..."
+  GEMINI_API_KEY = "AIza..."
 """
 
 import os
@@ -21,15 +21,14 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-# ── Prompt template ──────────────────────────────────────────────────────────
 _PROMPT = (
     "You are a helpful assistant. Read the following video transcript and write a "
-    "1–2 sentence plain-English summary of what the video is about. "
+    "1-2 sentence plain-English summary of what the video is about. "
     "Be concise. Output only the summary, nothing else.\n\n"
     "Transcript:\n{transcript}"
 )
 
-_MAX_TRANSCRIPT_CHARS = 4000   # Truncate very long transcripts before sending
+_MAX_TRANSCRIPT_CHARS = 4000
 
 
 def _get_secret(key: str) -> Optional[str]:
@@ -45,6 +44,7 @@ def _get_secret(key: str) -> Optional[str]:
 
 
 # ── Backend: Groq ─────────────────────────────────────────────────────────────
+
 def _summarize_groq(transcript: str) -> Optional[str]:
     api_key = _get_secret("GROQ_API_KEY")
     if not api_key:
@@ -52,7 +52,7 @@ def _summarize_groq(transcript: str) -> Optional[str]:
     try:
         from groq import Groq
         client = Groq(api_key=api_key)
-        resp = client.chat.completions.create(
+        resp   = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": _PROMPT.format(transcript=transcript)}],
             max_tokens=120,
@@ -67,7 +67,8 @@ def _summarize_groq(transcript: str) -> Optional[str]:
         return None
 
 
-# ── Backend: Gemini ───────────────────────────────────────────────────────────
+# ── Backend: Gemini (optional fallback) ───────────────────────────────────────
+
 def _summarize_gemini(transcript: str) -> Optional[str]:
     api_key = _get_secret("GEMINI_API_KEY")
     if not api_key:
@@ -76,7 +77,7 @@ def _summarize_gemini(transcript: str) -> Optional[str]:
         import google.generativeai as genai
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-1.5-flash")
-        resp = model.generate_content(
+        resp  = model.generate_content(
             _PROMPT.format(transcript=transcript),
             generation_config={"max_output_tokens": 120, "temperature": 0.3},
         )
@@ -89,51 +90,26 @@ def _summarize_gemini(transcript: str) -> Optional[str]:
         return None
 
 
-# ── Backend: AWS Bedrock (Claude Haiku) ───────────────────────────────────────
-def _summarize_bedrock(transcript: str) -> Optional[str]:
-    try:
-        import json, boto3
-        from pipeline.config import AWS_REGION
-        client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
-        body = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 120,
-            "messages": [{"role": "user", "content": _PROMPT.format(transcript=transcript)}],
-        })
-        resp = client.invoke_model(
-            modelId="anthropic.claude-haiku-20240307-v1:0",
-            contentType="application/json",
-            accept="application/json",
-            body=body,
-        )
-        result = json.loads(resp["body"].read())
-        return result["content"][0]["text"].strip()
-    except Exception as e:
-        log.warning(f"Bedrock summarizer failed: {e}")
-        return None
-
-
 # ── Public API ────────────────────────────────────────────────────────────────
+
 def summarize_transcript(transcript: str) -> Optional[str]:
     """
-    Summarize an English transcript.
+    Summarize a transcript using Groq (primary) or Gemini (fallback).
 
-    Returns a 1–2 sentence summary string, or None if no backend is available.
+    Returns a 1-2 sentence summary string, or None if no backend is available.
     The caller (app.py) wraps this in a try/except so failure is always safe.
     """
     if not transcript or not transcript.strip():
         return None
 
-    # Truncate to keep API cost/latency low
     text = transcript[:_MAX_TRANSCRIPT_CHARS].strip()
     if len(transcript) > _MAX_TRANSCRIPT_CHARS:
-        text += "…"
+        text += "..."
 
-    # Try backends in priority order
-    for fn in [_summarize_groq, _summarize_gemini, _summarize_bedrock]:
+    for fn in [_summarize_groq, _summarize_gemini]:
         result = fn(text)
         if result:
             log.info(f"Transcript summarized via {fn.__name__} ({len(result)} chars)")
-            return f"🧠 **Video Summary:** {result}"
+            return f"AI Summary: {result}"
 
     return None
