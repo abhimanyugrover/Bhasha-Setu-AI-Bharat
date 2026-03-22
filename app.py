@@ -1147,37 +1147,280 @@ with t_tr:
 #  AI CHAT
 # ══════════════════════════════════════════════════════════════════════════════
 with t_chat:
-    st.markdown('<div class="eyebrow">Multilingual AI</div>', unsafe_allow_html=True)
-    st.markdown('<div class="h-sec" style="margin-bottom:8px">AI Chat Assistant</div>',
+
+    import streamlit.components.v1 as _components
+    from datetime import datetime as _dt
+
+    ca, cb = st.columns([1.65, 0.35], gap="large")
+
+    # ── Right sidebar ──────────────────────────────────────────────────────────
+    with cb:
+        with st.container(border=True):
+            st.markdown('<div class="label">Response Language</div>',
+                        unsafe_allow_html=True)
+            chat_lang = st.selectbox(
+                "Respond in", list(LANG_CODES.keys()),
+                index=0, key="chat_lang_sel",
+                label_visibility="collapsed")
+
+        with st.container(border=True):
+            st.markdown('<div class="label">Quick Prompts</div>',
+                        unsafe_allow_html=True)
+            for icon, qp in [("🌐","What is Bhasha Setu?"),
+                              ("🔤","Translate: Hello World"),
+                              ("🤖","Explain AI simply"),
+                              ("🇮🇳","A fact about India")]:
+                st.markdown(
+                    f'<div style="display:flex;align-items:center;gap:8px;'
+                    f'background:var(--sur);border:1px solid var(--bdr);'
+                    f'border-radius:8px;padding:8px 11px;margin-bottom:6px;'
+                    f'font-size:12px;color:var(--tx2);">'
+                    f'{icon} {qp}</div>',
+                    unsafe_allow_html=True)
+
+        with st.container(border=True):
+            st.markdown('<div class="label">Model Info</div>',
+                        unsafe_allow_html=True)
+            st.markdown(
+                '<div style="background:var(--gs);border:1px solid var(--gb);'
+                'border-radius:8px;padding:10px 12px;">'
+                '<div style="font-size:13px;font-weight:700;color:var(--g1);">'
+                'Llama 3.1 8B</div>'
+                '<div style="font-size:11px;color:var(--tx3);margin-top:3px;">'
+                'via Groq · Free tier</div>'
+                '<div style="font-size:11px;color:var(--tx3);">~200ms latency</div>'
+                '</div>',
                 unsafe_allow_html=True)
-    st.markdown('<div class="body" style="margin-bottom:18px">'
-                'Powered by Groq Llama 3.1 — responds in any language you choose.</div>',
-                unsafe_allow_html=True)
+            msg_count = len(st.session_state.chat_msgs)
+            if msg_count:
+                st.markdown(
+                    f'<div style="font-size:11px;color:var(--tx3);'
+                    f'text-align:center;margin:8px 0;">'
+                    f'<span style="color:var(--p1);font-weight:700;">{msg_count}</span>'
+                    f' messages</div>',
+                    unsafe_allow_html=True)
+                if st.button("🗑️ Clear chat", key="clear_chat",
+                             use_container_width=True):
+                    st.session_state.chat_msgs = []
+                    st.rerun()
 
-    chat_lang = st.selectbox("Respond in", list(LANG_CODES.keys()),
-                             index=0, key="chat_lang_sel")
+    # ── Left: chat window via st.components.v1.html ────────────────────────────
+    with ca:
 
-    for m in st.session_state.chat_msgs:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+        # Build messages HTML
+        if not st.session_state.chat_msgs:
+            msgs_html = """
+            <div style="display:flex;flex-direction:column;align-items:center;
+              justify-content:center;height:100%;text-align:center;padding:40px 20px;">
+              <div style="width:64px;height:64px;border-radius:18px;
+                background:linear-gradient(135deg,#F4722B,#E53E3E);
+                display:flex;align-items:center;justify-content:center;
+                font-size:28px;margin-bottom:14px;
+                box-shadow:0 4px 20px rgba(244,114,43,.35);">🪷</div>
+              <div style="font-family:sans-serif;font-size:17px;font-weight:700;
+                color:#EEF1FF;margin-bottom:8px;">Namaste! How can I help?</div>
+              <div style="font-family:sans-serif;font-size:13px;color:#6b7a99;
+                line-height:1.75;max-width:280px;">
+                Ask me anything in any language — Hindi, Tamil, Telugu,
+                Bengali and many more.
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:8px;
+                justify-content:center;margin-top:18px;">
+                <span style="background:rgba(244,114,43,.12);
+                  border:1px solid rgba(244,114,43,.25);color:#F4722B;
+                  font-size:12px;font-weight:600;padding:6px 14px;
+                  border-radius:100px;font-family:sans-serif;">🌐 Translate text</span>
+                <span style="background:rgba(34,211,153,.09);
+                  border:1px solid rgba(34,211,153,.22);color:#34D399;
+                  font-size:12px;font-weight:600;padding:6px 14px;
+                  border-radius:100px;font-family:sans-serif;">📚 Learn a language</span>
+                <span style="background:rgba(255,255,255,.06);
+                  border:1px solid rgba(255,255,255,.10);color:#9BA3C0;
+                  font-size:12px;font-weight:600;padding:6px 14px;
+                  border-radius:100px;font-family:sans-serif;">🇮🇳 Indian culture</span>
+              </div>
+            </div>
+            """
+        else:
+            msgs_html = ""
+            for m in st.session_state.chat_msgs:
+                ts  = _dt.now().strftime("%I:%M %p")
+                txt = m["content"].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                if m["role"] == "user":
+                    msgs_html += f"""
+                    <div style="display:flex;justify-content:flex-end;
+                      align-items:flex-end;gap:9px;margin-bottom:16px;">
+                      <div style="display:flex;flex-direction:column;
+                        align-items:flex-end;max-width:72%;">
+                        <div style="background:linear-gradient(135deg,#F4722B,#E53E3E);
+                          color:#fff;border-radius:16px 16px 3px 16px;
+                          padding:11px 16px;font-family:sans-serif;
+                          font-size:14px;line-height:1.7;
+                          box-shadow:0 4px 16px rgba(244,114,43,.32);
+                          word-break:break-word;">{txt}</div>
+                        <div style="font-family:sans-serif;font-size:10px;
+                          color:#6b7a99;margin-top:5px;padding:0 4px;">
+                          You &middot; {ts}</div>
+                      </div>
+                      <div style="width:32px;height:32px;border-radius:9px;
+                        flex-shrink:0;background:rgba(244,114,43,.12);
+                        border:1px solid rgba(244,114,43,.25);
+                        display:flex;align-items:center;
+                        justify-content:center;font-size:14px;">👤</div>
+                    </div>
+                    """
+                else:
+                    msgs_html += f"""
+                    <div style="display:flex;justify-content:flex-start;
+                      align-items:flex-end;gap:9px;margin-bottom:16px;">
+                      <div style="width:32px;height:32px;border-radius:9px;
+                        flex-shrink:0;
+                        background:linear-gradient(135deg,#F4722B,#E53E3E);
+                        box-shadow:0 2px 10px rgba(244,114,43,.3);
+                        display:flex;align-items:center;
+                        justify-content:center;font-size:14px;">🪷</div>
+                      <div style="display:flex;flex-direction:column;
+                        align-items:flex-start;max-width:72%;">
+                        <div style="background:rgba(255,255,255,.07);
+                          border:1px solid rgba(255,255,255,.11);
+                          color:#EEF1FF;border-radius:16px 16px 16px 3px;
+                          padding:11px 16px;font-family:sans-serif;
+                          font-size:14px;line-height:1.7;
+                          word-break:break-word;">{txt}</div>
+                        <div style="font-family:sans-serif;font-size:10px;
+                          color:#6b7a99;margin-top:5px;padding:0 4px;">
+                          Bhasha Setu AI &middot; {ts}</div>
+                      </div>
+                    </div>
+                    """
 
-    if prompt := st.chat_input("Ask anything…"):
-        st.session_state.chat_msgs.append({"role":"user","content":prompt})
-        with st.chat_message("user"): st.markdown(prompt)
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking…"):
+        msg_count = len(st.session_state.chat_msgs)
+
+        # Full chat HTML rendered as a component (bypasses Streamlit markdown sanitizer)
+        chat_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <style>
+          * {{ box-sizing:border-box; margin:0; padding:0; }}
+          body {{
+            background: transparent;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+          }}
+          ::-webkit-scrollbar {{ width: 4px; }}
+          ::-webkit-scrollbar-track {{ background: transparent; }}
+          ::-webkit-scrollbar-thumb {{
+            background: linear-gradient(#F4722B, #E53E3E);
+            border-radius: 2px;
+          }}
+          .chat-wrap {{
+            display: flex;
+            flex-direction: column;
+            height: 540px;
+            border: 1px solid rgba(255,255,255,.09);
+            border-radius: 14px;
+            overflow: hidden;
+            background: rgba(255,255,255,.025);
+          }}
+          .chat-topbar {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 18px;
+            background: rgba(255,255,255,.05);
+            border-bottom: 1px solid rgba(255,255,255,.08);
+            flex-shrink: 0;
+          }}
+          .chat-topbar-left {{ display:flex; align-items:center; gap:11px; }}
+          .chat-ava {{
+            width: 38px; height: 38px; border-radius: 11px;
+            background: linear-gradient(135deg,#F4722B,#E53E3E);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 17px;
+            box-shadow: 0 3px 12px rgba(244,114,43,.35);
+            flex-shrink: 0;
+          }}
+          .chat-name {{
+            font-size: 14px; font-weight: 700; color: #EEF1FF;
+          }}
+          .chat-status {{
+            font-size: 11px; color: #34D399;
+            display: flex; align-items: center; gap: 4px; margin-top: 2px;
+          }}
+          .status-dot {{
+            width: 6px; height: 6px; border-radius: 50%;
+            background: #34D399; display: inline-block;
+          }}
+          .chat-badge {{
+            font-size: 10.5px; color: #6b7a99;
+            background: rgba(255,255,255,.04);
+            border: 1px solid rgba(255,255,255,.08);
+            padding: 3px 10px; border-radius: 100px;
+          }}
+          .chat-messages {{
+            flex: 1;
+            overflow-y: auto;
+            padding: 18px 18px 8px 18px;
+            scroll-behavior: smooth;
+          }}
+          .chat-footer {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 9px 18px;
+            background: rgba(255,255,255,.04);
+            border-top: 1px solid rgba(255,255,255,.07);
+            flex-shrink: 0;
+          }}
+          .footer-txt {{ font-size: 11px; color: #6b7a99; }}
+          .footer-txt span {{ color: #F4722B; font-weight: 700; }}
+        </style>
+        </head>
+        <body>
+        <div class="chat-wrap">
+          <div class="chat-topbar">
+            <div class="chat-topbar-left">
+              <div class="chat-ava">🪷</div>
+              <div>
+                <div class="chat-name">Bhasha Setu AI</div>
+                <div class="chat-status">
+                  <span class="status-dot"></span> Online &middot; Ready to chat
+                </div>
+              </div>
+            </div>
+            <div class="chat-badge">Groq &middot; Llama 3.1</div>
+          </div>
+          <div class="chat-messages" id="msgs">
+            {msgs_html}
+          </div>
+          <div class="chat-footer">
+            <div class="footer-txt">
+              <span>{msg_count}</span> messages &middot;
+              Language: <span>{chat_lang}</span>
+            </div>
+            <div class="footer-txt">Groq API &middot; Free</div>
+          </div>
+        </div>
+        <script>
+          var el = document.getElementById('msgs');
+          if (el) el.scrollTop = el.scrollHeight;
+        </script>
+        </body>
+        </html>
+        """
+
+        _components.html(chat_html, height=548, scrolling=False)
+
+        # Chat input below the component
+        if prompt := st.chat_input("Message Bhasha Setu AI…"):
+            st.session_state.chat_msgs.append({"role": "user", "content": prompt})
+            with st.spinner(""):
                 reply = do_chat(prompt, st.session_state.chat_msgs, chat_lang)
-            st.markdown(reply)
-        st.session_state.chat_msgs.append({"role":"assistant","content":reply})
+            st.session_state.chat_msgs.append({"role": "assistant", "content": reply})
+            st.rerun()
 
-    if st.session_state.chat_msgs:
-        if st.button("🗑️ Clear chat", key="clear_chat"):
-            st.session_state.chat_msgs = []; st.rerun()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  HISTORY
-# ══════════════════════════════════════════════════════════════════════════════
 with t_hist:
     history = load_history()
     if not history:
